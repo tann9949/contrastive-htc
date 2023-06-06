@@ -9,32 +9,62 @@ import json
 from collections import defaultdict
 
 np.random.seed(7)
+CHECKPOINT = "bert-base-uncased"
+# CHECKPOINT = "airesearch/wangchanberta-base-att-spm-uncased"
 
 if __name__ == '__main__':
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    source = []
-    labels = []
-    label_ids = []
-    label_dict = {}
-    hiera = defaultdict(set)
+    # load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(CHECKPOINT)
+
+    # init storages
+    source = []  # list of tokenized sentences as an token ID: List[List[Token ID: int]]
+    labels = []  # list of labels from root to child: List[List[Label: str]]
+    label_ids = []  # list of labels ID from root to child: Li[st[List[Label ID: int]]
+    label_dict = {}  # map label: str -> label ID: int
+    hiera = defaultdict(set)  # stores tree structure as a dict of set
+
+    # read data
     with open('wos_total.json', 'r') as f:
+        # iterate over json line
         for line in f.readlines():
             line = json.loads(line)
+            # convert sentence = line['doc_token'].strip().lower() to list of encoded token IDs
+            # also truncate to max length
+            # append to source
             source.append(tokenizer.encode(line['doc_token'].strip().lower(), truncation=True))
+            # append document label from doc_label to labels
             labels.append(line['doc_label'])
+    # labels: List[List[Label: str]]
+    # source: List[List[Token ID: int]]
+
+    # iterate over labels
+    # construct label_dict and label_ids from root
     for l in labels:
+        # if root label not in label_dict
         if l[0] not in label_dict:
+            # add root label to label_dict
             label_dict[l[0]] = len(label_dict)
+    # label_dict: Dict[Label: str, Label ID: int]
+
+    # update label_dict on child nodes
+    # iterate over labels
     for l in labels:
         assert len(l) == 2
+        # if child label not in label_dict
         if l[1] not in label_dict:
+            # add child label to label_dict
             label_dict[l[1]] = len(label_dict)
+        # append label_ids with [root label ID, child label ID]
         label_ids.append([label_dict[l[0]], label_dict[l[1]]])
         hiera[label_ids[-1][0]].add(label_ids[-1][1])
+    # hiera: Dict[Root Label ID: int, Set[Child Label ID: int]]
+
     value_dict = {i: tokenizer.encode(v.lower(), add_special_tokens=False) for v, i in label_dict.items()}
+    # value_dict stores label id -> tokenized label description
     torch.save(value_dict, 'bert_value_dict.pt')
     torch.save(hiera, 'slot.pt')
 
+    # save tokenized sentences and labels
     with open('tok.txt', 'w') as f:
         for s in source:
             f.writelines(' '.join(map(lambda x: str(x), s)) + '\n')
@@ -45,11 +75,12 @@ if __name__ == '__main__':
                 one_hot[i] = 1
             f.writelines(' '.join(map(lambda x: str(x), one_hot)) + '\n')
 
-    from fairseq.binarizer import Binarizer
+    from fairseq.binarizer import LegacyBinarizer as Binarizer
     from fairseq.data import indexed_dataset
+    from fairseq.file_chunker_utils import find_offsets
 
     for data_path in ['tok', 'Y']:
-        offsets = Binarizer.find_offsets(data_path + '.txt', 1)
+        offsets = find_offsets(data_path + '.txt', 1)
         ds = indexed_dataset.make_builder(
             data_path + '.bin',
             impl='mmap',

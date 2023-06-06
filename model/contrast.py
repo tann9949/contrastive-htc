@@ -1,21 +1,24 @@
-from transformers import AutoTokenizer
-from transformers.models.bert.modeling_bert import BertPreTrainedModel, BertEncoder
-from transformers.file_utils import ModelOutput
-from torch.nn import CrossEntropyLoss, MSELoss
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+from torch.nn import CrossEntropyLoss, MSELoss
+from transformers import AutoTokenizer
+from transformers.file_utils import ModelOutput
+from transformers.models.bert.modeling_bert import (BertEncoder,
+                                                    BertPreTrainedModel)
+from .criterion import TwoWayLoss
 from .graph import GraphEncoder
 
 
 class BertPoolingLayer(nn.Module):
-    def __init__(self, config, avg='cls'):
+    def __init__(self, avg="cls"):
         super(BertPoolingLayer, self).__init__()
+        assert avg in ["cls", "avg"], f"avg should be one of ['cls', 'avg']"
         self.avg = avg
 
     def forward(self, x):
-        if self.avg == 'cls':
+        if self.avg == "cls":
             x = x[:, 0, :]
         else:
             x = x.mean(dim=1)
@@ -32,7 +35,7 @@ class BertOutputLayer(nn.Module):
     def forward(self, x, **kwargs):
         x = self.dropout(x)
         x = self.dense(x)
-        x = torch.tanh(x)
+        x = torch.tanh(x)  # why tanh?
         x = self.dropout(x)
         x = self.out_proj(x)
         return x
@@ -305,14 +308,21 @@ class BertModel(BertPreTrainedModel):
 
 class ContrastModel(BertPreTrainedModel):
     def __init__(self, config, cls_loss=True, contrast_loss=True, graph=False, layer=1, data_path=None,
-                 multi_label=False, lamb=1, threshold=0.01, tau=1):
-        super(ContrastModel, self).__init__(config)
+                 multi_label=False, lamb=1, threshold=0.01, tau=1, pooling='cls', criterion='bce'):
+        super().__init__(config)
         self.num_labels = config.num_labels
         self.tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
-        self.bert = BertModel(config)
-        self.pooler = BertPoolingLayer(config, 'cls')
+
+        if config.model_type == "bert":
+            self.bert = BertModel(config)
+        elif config.model_type in ["roberta", "camembert", "xlm-roberta"]:
+            self.roberta = BertModel(config)
+        else:
+            raise NotImplementedError()
+        
+        self.pooler = BertPoolingLayer(pooling)
         self.contrastive_lossfct = NTXent(config)
         self.cls_loss = cls_loss
         self.contrast_loss = contrast_loss
@@ -323,6 +333,8 @@ class ContrastModel(BertPreTrainedModel):
 
         self.init_weights()
         self.multi_label = multi_label
+
+        self.criterion = criterion
 
     def forward(
             self,
@@ -340,9 +352,8 @@ class ContrastModel(BertPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         contrast_mask = None
-
-        outputs = self.bert(
-            input_ids,
+        params = dict(
+            input_ids=input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
@@ -352,8 +363,15 @@ class ContrastModel(BertPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             embedding_weight=contrast_mask,
-
         )
+
+        if hasattr(self, 'bert'):
+            outputs = self.bert(**params)
+        elif hasattr(self, 'roberta'):
+            outputs = self.roberta(**params)
+        else:
+            raise ValueError('No model found')
+        
         pooled_output = outputs[0]
         pooled_output = self.dropout(self.pooler(pooled_output))
 
@@ -368,7 +386,10 @@ class ContrastModel(BertPreTrainedModel):
                 loss_fct = CrossEntropyLoss()
                 target = labels.view(-1)
             else:
-                loss_fct = nn.BCEWithLogitsLoss()
+                if self.criterion == "bce":
+                    loss_fct = nn.BCEWithLogitsLoss()
+                elif self.criterion == "two_way":
+                    loss_fct = TwoWayLoss()
                 target = labels.to(torch.float32)
 
             if self.cls_loss:
@@ -380,11 +401,14 @@ class ContrastModel(BertPreTrainedModel):
                     loss += loss_fct(logits.view(-1, self.num_labels), target)
 
             if self.training:
-                contrast_mask = self.graph_encoder(outputs['inputs_embeds'],
-                                                   attention_mask, labels, lambda x: self.bert.embeddings(x)[0])
+                contrast_mask = self.graph_encoder(
+                    outputs['inputs_embeds'],
+                    attention_mask, labels, 
+                    lambda x: self.bert.embeddings(x)[0] if hasattr(self, 'bert') else self.roberta.embeddings(x)[0]
+                )
 
-                contrast_output = self.bert(
-                    input_ids,
+                params = dict(
+                    input_ids=input_ids,
                     attention_mask=attention_mask,
                     token_type_ids=token_type_ids,
                     position_ids=position_ids,
@@ -395,6 +419,14 @@ class ContrastModel(BertPreTrainedModel):
                     return_dict=return_dict,
                     embedding_weight=contrast_mask,
                 )
+
+                if hasattr(self, 'bert'):
+                    contrast_output = self.bert(**params)
+                elif hasattr(self, 'roberta'):
+                    contrast_output = self.roberta(**params)
+                else:
+                    raise ValueError('No model found')
+                
                 contrast_sequence_output = self.dropout(self.pooler(contrast_output[0]))
                 contrast_logits = self.classifier(contrast_sequence_output)
                 contrastive_loss = self.contrastive_lossfct(

@@ -1,15 +1,16 @@
-from transformers import AutoTokenizer
-from fairseq.data import data_utils
-import torch
-from torch.utils.data import Dataset, DataLoader, Subset
-from model.optim import ScheduledOptim, Adam
-from tqdm import tqdm
 import argparse
 import os
-from eval import evaluate
-from model.contrast import ContrastModel
+
+import torch
+from fairseq.data import data_utils
+from torch.utils.data import DataLoader, Dataset, Subset
+from tqdm import tqdm
+from transformers import AutoTokenizer
 
 import utils
+from eval import evaluate
+from model.contrast import ContrastModel
+from model.optim import Adam, ScheduledOptim
 
 
 class BertDataset(Dataset):
@@ -62,6 +63,8 @@ class Saver:
 
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--model_name', type=str, default='bert-base-uncased', help='Pretrained model name.')
+parser.add_argument('--max_len', type=int, default=512, help='Max length of input sequence.')
 parser.add_argument('--lr', type=float, default=3e-5, help='Learning rate.')
 parser.add_argument('--data', type=str, default='WebOfScience', choices=['WebOfScience', 'nyt', 'rcv1'], help='Dataset.')
 parser.add_argument('--batch', type=int, default=12, help='Batch size.')
@@ -79,6 +82,7 @@ parser.add_argument('--thre', default=0.02, type=float, help='Threshold for keep
 parser.add_argument('--tau', default=1, type=float, help='Temperature for contrastive model.')
 parser.add_argument('--seed', default=3, type=int, help='Random seed.')
 parser.add_argument('--wandb', default=False, action='store_true', help='Use wandb for logging.')
+parser.add_argument('--criterion', type=str, default='bce', help='Criterion for multi-label classification.')
 
 
 def get_root(path_dict, n):
@@ -99,17 +103,19 @@ if __name__ == '__main__':
         wandb.init(config=args, project='htc')
     utils.seed_torch(args.seed)
     args.name = args.data + '-' + args.name
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     data_path = os.path.join('data', args.data)
     label_dict = torch.load(os.path.join(data_path, 'bert_value_dict.pt'))
     label_dict = {i: tokenizer.decode(v, skip_special_tokens=True) for i, v in label_dict.items()}
     num_class = len(label_dict)
 
-    dataset = BertDataset(device=device, pad_idx=tokenizer.pad_token_id, data_path=data_path)
-    model = ContrastModel.from_pretrained('bert-base-uncased', num_labels=num_class,
+    dataset = BertDataset(device=device, max_token=args.max_len, pad_idx=tokenizer.pad_token_id, data_path=data_path)
+    model = ContrastModel.from_pretrained(args.model_name, num_labels=num_class,
                                           contrast_loss=args.contrast, graph=args.graph,
                                           layer=args.layer, data_path=data_path, multi_label=args.multi,
-                                          lamb=args.lamb, threshold=args.thre, tau=args.tau)
+                                          lamb=args.lamb, threshold=args.thre, tau=args.tau, criterion=args.criterion)
+    
+    # model = torch.compile(model)
     if args.wandb:
         wandb.watch(model)
     split = torch.load(os.path.join(data_path, 'split.pt'))
@@ -146,20 +152,27 @@ if __name__ == '__main__':
         pbar = tqdm(train)
         for data, label, idx in pbar:
             padding_mask = data != tokenizer.pad_token_id
-            output = model(data, padding_mask, labels=label, return_dict=True, )
+            output = model(data, padding_mask, labels=label, return_dict=True)
             loss /= args.update
+            print(output['loss'], label.sum(-1))
             output['loss'].backward()
+
             loss += output['loss'].item()
             i += 1
             if i % args.update == 0:
+                # clip gradient
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                print("update")
                 optimizer.step()
                 optimizer.zero_grad()
+
+                print(loss)
                 if args.wandb:
                     wandb.log({'train_loss': loss})
                 pbar.set_description('loss:{:.4f}'.format(loss))
                 i = 0
                 loss = 0
-                # torch.cuda.empty_cache()
+                torch.cuda.empty_cache()
         pbar.close()
 
         model.eval()

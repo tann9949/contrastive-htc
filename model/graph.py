@@ -1,11 +1,11 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_geometric.nn import GATConv, GCNConv
 from transformers import AutoTokenizer
 from transformers.activations import ACT2FN
-import os
-
-from torch_geometric.nn import GCNConv, GATConv
 
 # GRAPH = 'GCN'
 GRAPH = "GRAPHORMER"
@@ -240,11 +240,11 @@ class GraphLayer(nn.Module):
 
 class GraphEncoder(nn.Module):
     def __init__(self, config, graph=False, layer=1, data_path=None, threshold=0.01, tau=1):
-        super(GraphEncoder, self).__init__()
+        super().__init__()
         self.config = config
         self.tau = tau
         self.label_dict = torch.load(os.path.join(data_path, 'bert_value_dict.pt'))
-        self.tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+        self.tokenizer = AutoTokenizer.from_pretrained(config.name_or_path)
 
         self.label_dict = {i: self.tokenizer.decode(v) for i, v in self.label_dict.items()}
         self.label_name = []

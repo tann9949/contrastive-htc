@@ -1,0 +1,15 @@
+version: 3.9
+
+services:
+  hgclr_trainer:
+    build: .
+    volumes:
+      - /raid/chompakornc/csd/contrastive-htc:/workspace
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['4']
+              capabilities: [gpu]

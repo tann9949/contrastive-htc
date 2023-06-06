@@ -1,0 +1,1 @@
+docker build -t hgclr_trainer .

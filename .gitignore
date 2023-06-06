@@ -1,3 +1,13 @@
+# checkpoints
+checkpoints
+data/WebOfScience/*.txt
+data/WebOfScience/*.bin
+data/WebOfScience/*.idx
+data/WebOfScience/*.json
+data/WebOfScience/*.pt
+data/WebOfScience/*.taxnomy
+data/WebOfScience/Meta-data
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -103,7 +113,7 @@ celerybeat.pid
 
 # Environments
 .env
-.venv
+*.venv
 env/
 venv/
 ENV/

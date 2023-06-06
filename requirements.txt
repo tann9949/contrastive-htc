@@ -1,0 +1,10 @@
+fairseq
+numpy
+scikit-learn
+torch
+torch_geometric
+tqdm
+transformers
+tensorboardX
+pandas
+sentencepiece
